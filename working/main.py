@@ -1,102 +1,79 @@
-import os
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
 import numpy as np
-from flask import Flask, request, jsonify, send_file
 from tensorflow.keras.models import load_model
 from PIL import Image
-import io
+import uvicorn
+import os
 
-app = Flask(__name__)
+# ------------------------------------------------
+# Load models
+# ------------------------------------------------
+encoder = load_model("encoder_model.h5")
+decoder = load_model("decoder_model.h5")
 
-# ==============================
-# LOAD MODELS
-# ==============================
-ENCODER_PATH = "encoder.h5"
-DECODER_PATH = "decoder.h5"
+# ------------------------------------------------
+# Helper functions
+# ------------------------------------------------
+def load_image_bytes(data, size=(256,256)):
+    img = Image.open(data).convert("RGB").resize(size)
+    return np.array(img)/255.0
 
-encoder = load_model(ENCODER_PATH)
-decoder = load_model(DECODER_PATH)
-
-# ==============================
-# IMAGE HELPERS
-# ==============================
-def load_and_preprocess(img_file, size=(256, 256)):
-    img = Image.open(img_file).convert("RGB")
-    img = img.resize(size)
-    img = np.array(img) / 255.0
-    return np.expand_dims(img, axis=0)
+def expand_watermark(wm, size=(256,256)):
+    wm = Image.fromarray((wm*255).astype(np.uint8)).resize(size)
+    return np.array(wm)/255.0
 
 def array_to_image(arr):
-    arr = np.clip(arr[0] * 255.0, 0, 255).astype("uint8")
+    arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
     return Image.fromarray(arr)
 
-# ==============================
-# ROUTE: Watermark Embedding
-# ==============================
-@app.route("/embed", methods=["POST"])
-def embed_watermark():
+# ------------------------------------------------
+# FastAPI Application
+# ------------------------------------------------
+app = FastAPI()
 
-    if "image" not in request.files or "watermark" not in request.files:
-        return jsonify({"error": "You must upload 'image' and 'watermark'"}), 400
+@app.post("/embed")
+async def embed_watermark(
+    host: UploadFile = File(...),
+    watermark: UploadFile = File(...)
+):
 
-    host_image = request.files["image"]
-    watermark_image = request.files["watermark"]
+    # Load images
+    host_img = load_image_bytes(host.file)
+    wm_img = load_image_bytes(watermark.file)
 
-    # Preprocess
-    host = load_and_preprocess(host_image)
-    wm = load_and_preprocess(watermark_image)
+    # Shrink watermark to 64×64 and expand back
+    wm_small = Image.fromarray((wm_img*255).astype(np.uint8)).resize((64,64))
+    wm_small = np.array(wm_small)/255.0
+    wm_big = expand_watermark(wm_small)
 
-    # Predict the encoded output
-    encoded = encoder.predict([host, wm])
+    # Build 6-channel input
+    combined = np.concatenate([host_img, wm_big], axis=-1)
+    combined = np.expand_dims(combined, 0)
 
-    # Convert to image
-    output_image = array_to_image(encoded)
+    # Encode
+    watermarked = encoder.predict(combined)[0]
+    output = array_to_image(watermarked)
 
-    # Return file
-    buf = io.BytesIO()
-    output_image.save(buf, format="PNG")
-    buf.seek(0)
+    output_path = "api_watermarked.png"
+    output.save(output_path)
 
-    return send_file(buf, mimetype="image/png")
-
-
-# ==============================
-# ROUTE: Extract Watermark
-# ==============================
-@app.route("/extract", methods=["POST"])
-def extract_watermark():
-
-    if "watermarked_image" not in request.files:
-        return jsonify({"error": "Upload 'watermarked_image'"}), 400
-
-    watermarked = request.files["watermarked_image"]
-
-    wm_img = load_and_preprocess(watermarked)
-
-    # Decode watermark
-    decoded = decoder.predict(wm_img)
-
-    decoded_img = array_to_image(decoded)
-
-    buf = io.BytesIO()
-    decoded_img.save(buf, format="PNG")
-    buf.seek(0)
-
-    return send_file(buf, mimetype="image/png")
+    return FileResponse(output_path, media_type="image/png", filename="watermarked.png")
 
 
-# ==============================
-# ROOT
-# ==============================
-@app.route("/", methods=["GET"])
-def index():
-    return """
-    <h1>Deep Learning Image Watermarking API</h1>
-    <p>Use POST /embed and POST /extract</p>
-    """
+@app.post("/extract")
+async def extract_watermark(img: UploadFile = File(...)):
+    watermarked = load_image_bytes(img.file)
+
+    extracted = decoder.predict(np.expand_dims(watermarked,0))[0]
+    out_img = array_to_image(extracted)
+
+    output_path = "extracted_api.png"
+    out_img.save(output_path)
+
+    return FileResponse(output_path, media_type="image/png", filename="extracted.png")
 
 
-# ==============================
-# MAIN
-# ==============================
+# Run the API
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

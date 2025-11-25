@@ -1,50 +1,57 @@
 import numpy as np
 from tensorflow.keras.models import load_model
 from PIL import Image
+import os
 
-# ==============================
-# USER CONFIG: Set your paths
-# ==============================
-HOST_IMAGE_PATH = "host.png"          # image to be watermarked
-WATERMARK_IMAGE_PATH = "watermark.png"  # watermark logo/image
-OUTPUT_PATH = "watermarked_output.png"  # saved output
+# ------------------------------------------------
+# Helper Functions
+# ------------------------------------------------
+def load_image(path, size=(256,256)):
+    img = Image.open(path).convert("RGB").resize(size)
+    return np.array(img)/255.0
 
-MODEL_PATH = "encoder.h5"  # trained encoder model
+def expand_watermark(wm, size=(256,256)):
+    wm = Image.fromarray((wm*255).astype(np.uint8)).resize(size)
+    return np.array(wm)/255.0
 
-
-# ==============================
-# FUNCTIONS
-# ==============================
-def load_and_preprocess(path, size=(256, 256)):
-    img = Image.open(path).convert("RGB")
-    img = img.resize(size)
-    img = np.array(img) / 255.0
-    return np.expand_dims(img, axis=0)
-
-def array_to_image(arr):
-    arr = np.clip(arr[0] * 255.0, 0, 255).astype("uint8")
-    return Image.fromarray(arr)
+def save_image(arr, path):
+    arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
+    Image.fromarray(arr).save(path)
 
 
-# ==============================
-# MAIN EXECUTION
-# ==============================
+# ------------------------------------------------
+# Main Execution
+# ------------------------------------------------
 def main():
-    print("Loading model...")
-    encoder = load_model(MODEL_PATH)
+    print("Loading models...")
+    encoder = load_model("encoder_model.h5")
+    decoder = load_model("decoder_model.h5")
 
-    print("Loading images...")
-    host = load_and_preprocess(HOST_IMAGE_PATH)
-    watermark = load_and_preprocess(WATERMARK_IMAGE_PATH)
+    print("Loading host image + watermark...")
+    host = load_image("host.png")  # <--- YOU MUST PROVIDE THIS
+    wm = load_image("watermark.png")
 
-    print("Embedding watermark...")
-    encoded = encoder.predict([host, watermark])
+    # Resize watermark to 64×64 and expand back to 256×256
+    wm_small = Image.fromarray((wm*255).astype(np.uint8)).resize((64,64))
+    wm_small = np.array(wm_small) / 255.0
+    wm_big = expand_watermark(wm_small)
 
-    print("Saving output...")
-    output_img = array_to_image(encoded)
-    output_img.save(OUTPUT_PATH)
+    # Build 6-channel model input
+    combined = np.concatenate([host, wm_big], axis=-1)
+    combined = np.expand_dims(combined, 0)   # (1,256,256,6)
 
-    print(f"Done! Watermarked image saved as: {OUTPUT_PATH}")
+    print("Encoding watermark...")
+    watermarked = encoder.predict(combined)[0]
+
+    print("Decoding watermark...")
+    extracted = decoder.predict(np.expand_dims(watermarked,0))[0]
+
+    # Save output images
+    save_image(watermarked, "watermarked_output.png")
+    save_image(extracted, "extracted_watermark.png")
+
+    print("✅ Watermarked image saved as 'watermarked_output.png'")
+    print("✅ Extracted watermark saved as 'extracted_watermark.png'")
 
 
 if __name__ == "__main__":
